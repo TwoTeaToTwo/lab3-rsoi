@@ -1,14 +1,37 @@
 openapi: 3.0.3
 info:
-  title: Flight Booking System — лабораторная работа №2, вариант 1
-  version: 1.0.0
+  title: Flight Booking System — лабораторная работа №3, вариант 1
+  version: 2.0.0
   description: |
     Контракт четырех сервисов. Публичная точка входа — Gateway (8080).
     Flight Service (8060), Ticket Service (8070) и Bonus Service (8050)
     предоставляют внутренние API только для вызовов Gateway; горизонтальные вызовы запрещены.
     Каждый сервис работает только со своей логической базой PostgreSQL. Gateway не имеет БД.
+    При расхождениях требований задания и приемочных тестов приоритет имеют тесты v1 ЛР №3.
     Заголовок X-User-Name идентифицирует пользователя в рамках учебного задания;
     он не является механизмом аутентификации.
+
+    Отказоустойчивость чтений:
+    * Все исходящие чтения Gateway, в том числе внутри покупки и возврата, защищены Circuit Breaker.
+      Flight, Ticket и Bonus имеют отдельные состояния и счетчики в памяти Gateway.
+    * После N технических неудач подряд цепь открывается: следующий вызов не отправляется сервису.
+      Успешное чтение сбрасывает счетчик; N и время ожидания настраиваются.
+      После ожидания допускается один проверочный запрос (Half-open), остальные чтения сразу
+      обрабатываются как недоступность. Успешная проверка закрывает цепь и сбрасывает счетчик;
+      техническая ошибка снова открывает цепь и запускает ожидание заново.
+    * Технические неудачи — HTTP 5xx, сетевые ошибки, таймауты и невалидные ответы сервиса.
+      HTTP 4xx не считаются отказом доступности и не подменяются fallback.
+      Внутренние HTTP-повторы чтений не выполняются: одна попытка учитывается один раз.
+      Локальный отказ открытой цепи и возврат fallback не увеличивают счетчик.
+    * Недоступность критичного источника возвращает ошибку; некритичного — частичный ответ 200.
+      Открытый Circuit Breaker обрабатывается по тем же правилам, что и сетевой отказ.
+    * Flight критичен для списка рейсов; Ticket — для списка билетов, отдельного билета и /me.
+      Их недоступность возвращает 500. Bonus критичен для /privilege: возвращается 503
+      с телом {"message":"Bonus Service unavailable"}, как требуют приемочные тесты.
+    * В ответах чтения билетов недоступные fromAirport, toAirport и date равны строке "Unavailable".
+      ticketUid, flightNumber, price и status сохраняются из Ticket Service.
+      В /me недоступный Bonus представлен как privilege={}, без выдуманного баланса или статуса.
+    * Изменяющие вызовы и фоновые повторы бонусного возврата не блокируются Circuit Breaker чтений.
 
     Решения, уточняющие неоднозначности шаблона:
     * page нумеруется с 1; page=0 считается ошибкой валидации.
@@ -18,15 +41,20 @@ info:
     * price в запросе покупки должен совпадать с актуальной ценой Flight Service.
     * price в ответе — полная цена рейса до применения бонусов;
       paidByMoney + paidByBonuses = price.
-    * Внешнее поле date рейса имеет формат YYYY-MM-DD HH:mm, как в примерах задания;
+    * При доступном Flight поле date рейса имеет формат YYYY-MM-DD HH:mm, как в примерах задания;
       для тестового рейса используется Europe/Moscow. Время бонусных операций — RFC 3339 в UTC.
     * balanceDiff — неотрицательная величина операции; направление задает operationType.
-    * Повторная отмена своего билета возвращает 204 без повторного изменения бонусов.
+    * Возврат сначала устанавливает CANCELED в Ticket, затем отменяет бонусную операцию.
+      При временной недоступности Bonus Gateway подтверждает постановку задания в очередь
+      и возвращает 204. Баланс исправляется фоновым HTTP-вызовом после восстановления Bonus;
+      интервал повторов — 10 секунд, временные ошибки не ограничивают срок жизни задания.
+    * Повторная отмена своего билета возвращает 204 без повторного изменения бонусов
+      и обеспечивает завершение ранее отложенной операции.
     * Несуществующий и чужой билет одинаково возвращают 404.
     * Возвращенные билеты сохраняются и включаются в список со статусом CANCELED.
 
     Публичный API основан на исходном OpenAPI и Postman-коллекции v1.
-    Внутренние маршруты являются проектным решением для последующей реализации.
+    Схема описывает целевой контракт ЛР №3. Внутренние маршруты являются проектным решением.
 servers:
 - url: http://localhost:8080
   description: Gateway — публичный API
@@ -48,13 +76,25 @@ paths:
                 $ref: '#/components/schemas/PaginationResponse'
         '400':
           $ref: '#/components/responses/BadRequest'
-        '503':
-          $ref: '#/components/responses/ServiceUnavailable'
         '500':
-          $ref: '#/components/responses/InternalError'
+          description: Недоступен критичный источник (Flight) или произошла внутренняя ошибка Gateway
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+              examples:
+                flightUnavailable:
+                  value:
+                    message: Flight Service unavailable
+                internalError:
+                  value:
+                    message: Internal server error
       operationId: listFlights
-      description: Стабильная сортировка по id рейса. За пределами списка возвращается 200 с пустым items.
+      description: |-
+        Стабильная сортировка по id рейса. За пределами списка возвращается 200 с пустым items.
         Параметры page и size по умолчанию равны 1 и 10.
+        Flight Service — критичный источник. При его недоступности или открытой цепи возвращается 500;
+        пустой список не используется как fallback недоступного источника.
   /api/v1/tickets:
     get:
       summary: Информация по всем билетам пользователя
@@ -71,15 +111,49 @@ paths:
                 type: array
                 items:
                   $ref: '#/components/schemas/TicketResponse'
+              examples:
+                complete:
+                  summary: Все источники доступны
+                  value:
+                  - ticketUid: 049161bb-badd-4fa8-9d90-87c9a82b0668
+                    flightNumber: AFL031
+                    fromAirport: Санкт-Петербург Пулково
+                    toAirport: Москва Шереметьево
+                    date: 2021-10-08 20:00
+                    price: 1500
+                    status: PAID
+                flightUnavailable:
+                  summary: Flight недоступен; данные билета сохранены
+                  value:
+                  - ticketUid: 049161bb-badd-4fa8-9d90-87c9a82b0668
+                    flightNumber: AFL031
+                    fromAirport: Unavailable
+                    toAirport: Unavailable
+                    date: Unavailable
+                    price: 1500
+                    status: PAID
         '400':
           $ref: '#/components/responses/BadRequest'
-        '503':
-          $ref: '#/components/responses/ServiceUnavailable'
         '500':
-          $ref: '#/components/responses/InternalError'
+          description: Недоступен критичный источник (Ticket) или произошла внутренняя ошибка Gateway
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+              examples:
+                ticketUnavailable:
+                  value:
+                    message: Ticket Service unavailable
+                internalError:
+                  value:
+                    message: Internal server error
       operationId: listUserTickets
-      description: Только билеты пользователя, включая CANCELED. При отсутствии билетов возвращается пустой
-        массив. Gateway дополняет их сведениями Flight Service.
+      description: |-
+        Только билеты пользователя, включая CANCELED. При отсутствии билетов возвращается пустой массив.
+        Ticket Service — критичный источник: при его недоступности или открытой цепи возвращается 500.
+        Flight Service — некритичный источник: при его недоступности или открытой цепи возвращается 200
+        со всеми доступными билетами; fromAirport, toAirport и date для недоступных рейсов равны "Unavailable".
+        Доступные сведения о других рейсах сохраняются. Отказ Flight не заменяет список билетов пустым массивом.
     post:
       summary: Покупка билета
       tags:
@@ -102,9 +176,23 @@ paths:
         '400':
           $ref: '#/components/responses/BadRequest'
         '503':
-          $ref: '#/components/responses/ServiceUnavailable'
+          $ref: '#/components/responses/BonusServiceUnavailable'
         '500':
-          $ref: '#/components/responses/InternalError'
+          description: Недоступен критичный источник (Flight, Ticket) или произошла внутренняя ошибка Gateway
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+              examples:
+                flightUnavailable:
+                  value:
+                    message: Flight Service unavailable
+                ticketUnavailable:
+                  value:
+                    message: Ticket Service unavailable
+                internalError:
+                  value:
+                    message: Internal server error
       operationId: purchaseTicket
       description: |-
         Gateway проверяет существование рейса и совпадение цены; отсутствие рейса или неверная цена возвращают 400.
@@ -114,8 +202,14 @@ paths:
         Ответ содержит полную цену и бонусный баланс после операции.
         Публичный POST не идемпотентен: новый запрос может создать новый билет.
         Gateway генерирует один ticketUid и использует его для внутренних операций одной покупки.
-        При межсервисном сбое Gateway обязан согласовать результаты или выполнить компенсацию;
-        503 не гарантирует, что побочные эффекты отсутствуют.
+        При недоступности Flight покупка завершается ошибкой до создания билета.
+        При недоступности Ticket покупка завершается ошибкой до бонусной операции.
+        При техническом сбое Bonus Gateway откатывает результат создания билета и возвращает
+        503 с телом {"message":"Bonus Service unavailable"}.
+        Если ответ Bonus потерян, Gateway должен согласовать и бонусную операцию:
+        отсутствие ответа не доказывает отсутствие изменений. Компенсации используют тот же ticketUid.
+        Ошибка покупки не должна оставлять действующий оплаченный билет или несогласованное изменение бонусов.
+        Открытый Circuit Breaker чтений не заменяет покупку успешным ответом и не запрещает компенсацию.
   /api/v1/tickets/{ticketUid}:
     get:
       summary: Информация по конкретному билету
@@ -131,15 +225,50 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/TicketResponse'
+              examples:
+                complete:
+                  summary: Все источники доступны
+                  value:
+                    ticketUid: 049161bb-badd-4fa8-9d90-87c9a82b0668
+                    flightNumber: AFL031
+                    fromAirport: Санкт-Петербург Пулково
+                    toAirport: Москва Шереметьево
+                    date: 2021-10-08 20:00
+                    price: 1500
+                    status: PAID
+                flightUnavailable:
+                  summary: Flight недоступен; данные билета сохранены
+                  value:
+                    ticketUid: 049161bb-badd-4fa8-9d90-87c9a82b0668
+                    flightNumber: AFL031
+                    fromAirport: Unavailable
+                    toAirport: Unavailable
+                    date: Unavailable
+                    price: 1500
+                    status: PAID
         '404':
           $ref: '#/components/responses/NotFound'
         '400':
           $ref: '#/components/responses/BadRequest'
-        '503':
-          $ref: '#/components/responses/ServiceUnavailable'
         '500':
-          $ref: '#/components/responses/InternalError'
+          description: Недоступен критичный источник (Ticket) или произошла внутренняя ошибка Gateway
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+              examples:
+                ticketUnavailable:
+                  value:
+                    message: Ticket Service unavailable
+                internalError:
+                  value:
+                    message: Internal server error
       operationId: getUserTicket
+      description: |-
+        Проверяется владелец билета. Чужой или отсутствующий билет возвращает 404.
+        Ticket Service — критичный источник: при его недоступности или открытой цепи возвращается 500.
+        Flight Service — некритичный источник: при его недоступности или открытой цепи возвращается 200
+        с сохраненными ticketUid, flightNumber, price и status; fromAirport, toAirport и date равны "Unavailable".
     delete:
       summary: Возврат билета
       tags:
@@ -149,21 +278,41 @@ paths:
       - $ref: '#/components/parameters/TicketUid'
       responses:
         '204':
-          description: Возврат билета успешно выполнен
+          description: |-
+            Билет имеет статус CANCELED. Бонусная операция завершена либо надежно поставлена в очередь.
+            Тело ответа отсутствует. Исправление бонусного баланса может завершиться после ответа.
         '404':
           $ref: '#/components/responses/NotFound'
         '400':
           $ref: '#/components/responses/BadRequest'
         '503':
-          $ref: '#/components/responses/ServiceUnavailable'
+          $ref: '#/components/responses/RefundQueueUnavailable'
         '500':
-          $ref: '#/components/responses/InternalError'
+          description: Недоступен критичный источник (Ticket) или произошла внутренняя ошибка Gateway
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+              examples:
+                ticketUnavailable:
+                  value:
+                    message: Ticket Service unavailable
+                internalError:
+                  value:
+                    message: Internal server error
       operationId: cancelUserTicket
       description: |-
-        Проверить владельца. Билет сохраняется со статусом CANCELED.
-        Вернуть ранее списанные бонусы либо снять начисленные, не опуская баланс ниже 0.
-        Повторный возврат своего билета — 204 без повторной бонусной операции.
-        При сбое повтор должен завершить согласование состояния Ticket и Bonus Service.
+        Сначала проверить владельца и установить статус CANCELED в Ticket Service.
+        Если чтение или изменение Ticket недоступно, вернуть 500: успешный возврат не подтверждается.
+        Затем вернуть ранее списанные бонусы либо снять начисленные, не опуская баланс ниже 0.
+        При временной недоступности Bonus (включая HTTP 5xx и таймаут) Gateway ставит бонусный возврат
+        в очередь и после подтверждения постановки возвращает 204 без тела.
+        Обработчик Gateway повторяет HTTP-запрос к Bonus с тем же ticketUid каждые 10 секунд до успеха.
+        Сообщение подтверждается после успешного выполнения; повторная доставка не меняет баланс повторно.
+        Bonus Service не читает очередь и не вызывает другие сервисы.
+        Повторный DELETE для своего CANCELED-билета также обеспечивает завершение бонусного возврата.
+        При ошибке постановки в очередь успех не возвращается: 503 допускает повтор DELETE.
+        Flight Service для возврата не требуется. Breaker чтений не блокирует бонусные записи.
   /api/v1/me:
     get:
       summary: Информация о пользователе
@@ -173,20 +322,88 @@ paths:
       - $ref: '#/components/parameters/UserName'
       responses:
         '200':
-          description: Полная информация о пользователе
+          description: Информация о пользователе, включая частичный ответ при отказе Flight или Bonus
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/UserInfoResponse'
+              examples:
+                complete:
+                  summary: Все источники доступны
+                  value:
+                    tickets:
+                    - ticketUid: 049161bb-badd-4fa8-9d90-87c9a82b0668
+                      flightNumber: AFL031
+                      fromAirport: Санкт-Петербург Пулково
+                      toAirport: Москва Шереметьево
+                      date: 2021-10-08 20:00
+                      price: 1500
+                      status: PAID
+                    privilege:
+                      balance: 150
+                      status: BRONZE
+                bonusUnavailable:
+                  summary: Bonus недоступен
+                  value:
+                    tickets:
+                    - ticketUid: 049161bb-badd-4fa8-9d90-87c9a82b0668
+                      flightNumber: AFL031
+                      fromAirport: Санкт-Петербург Пулково
+                      toAirport: Москва Шереметьево
+                      date: 2021-10-08 20:00
+                      price: 1500
+                      status: PAID
+                    privilege: {}
+                flightUnavailable:
+                  summary: Flight недоступен
+                  value:
+                    tickets:
+                    - ticketUid: 049161bb-badd-4fa8-9d90-87c9a82b0668
+                      flightNumber: AFL031
+                      fromAirport: Unavailable
+                      toAirport: Unavailable
+                      date: Unavailable
+                      price: 1500
+                      status: PAID
+                    privilege:
+                      balance: 150
+                      status: BRONZE
+                flightAndBonusUnavailable:
+                  summary: Flight и Bonus недоступны
+                  value:
+                    tickets:
+                    - ticketUid: 049161bb-badd-4fa8-9d90-87c9a82b0668
+                      flightNumber: AFL031
+                      fromAirport: Unavailable
+                      toAirport: Unavailable
+                      date: Unavailable
+                      price: 1500
+                      status: PAID
+                    privilege: {}
         '400':
           $ref: '#/components/responses/BadRequest'
-        '503':
-          $ref: '#/components/responses/ServiceUnavailable'
         '500':
-          $ref: '#/components/responses/InternalError'
+          description: Недоступен критичный источник (Ticket) или произошла внутренняя ошибка Gateway
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+              examples:
+                ticketUnavailable:
+                  value:
+                    message: Ticket Service unavailable
+                internalError:
+                  value:
+                    message: Internal server error
       operationId: getUserInfo
-      description: Gateway объединяет билеты из Ticket Service, сведения о рейсах из Flight Service и
+      description: |-
+        Gateway объединяет билеты из Ticket Service, сведения о рейсах из Flight Service и
         короткую информацию Bonus Service. История бонусов в privilege не включается.
+        При недоступном Ticket или открытой цепи Ticket возвращается 500.
+        При недоступном Flight или открытой цепи Flight сохраняются билеты,
+        а fromAirport, toAirport и date недоступных рейсов равны "Unavailable".
+        При недоступном Bonus или открытой цепи Bonus возвращается privilege={}.
+        Если Flight и Bonus недоступны одновременно, применяются обе заглушки, статус ответа — 200.
   /api/v1/privilege:
     get:
       summary: Получить информацию о состоянии бонусного счета
@@ -204,12 +421,17 @@ paths:
         '400':
           $ref: '#/components/responses/BadRequest'
         '503':
-          $ref: '#/components/responses/ServiceUnavailable'
+          $ref: '#/components/responses/BonusServiceUnavailable'
         '500':
           $ref: '#/components/responses/InternalError'
       operationId: getUserPrivilege
-      description: Счет отсутствующего пользователя создается с balance=0 и status=BRONZE. История упорядочена
+      description: |-
+        Счет отсутствующего пользователя создается с balance=0 и status=BRONZE. История упорядочена
         по времени, затем id по возрастанию; включает покупки и обратные операции возврата.
+        Bonus Service — критичный источник. При недоступности или открытой цепи возвращается
+        503 с телом {"message":"Bonus Service unavailable"}. Пустой счет как fallback не возвращается.
+        При отложенном возврате баланс и история отражают только уже выполненные бонусные операции;
+        после фонового выполнения возврата они обновляются.
   /internal/v1/flights:
     servers:
     - url: http://localhost:8060
@@ -368,7 +590,8 @@ paths:
       operationId: internalCancelTicket
       summary: Идемпотентно пометить билет CANCELED
       description: Изменяет только свою БД. Бонусы возвращает Gateway отдельным вызовом Bonus Service.
-        Чужой и отсутствующий билет — 404.
+        Чужой и отсутствующий билет — 404. Gateway выполняет этот вызов до отмены бонусной операции;
+        временная недоступность Bonus не препятствует сохранению CANCELED.
       parameters:
       - $ref: '#/components/parameters/UserName'
       - $ref: '#/components/parameters/TicketUid'
@@ -476,6 +699,9 @@ paths:
         Повтор не изменяет баланс и возвращает его текущее состояние.
         Неизвестная или чужая операция — 404. Используется Gateway при возврате
         и для компенсации неуспешной покупки; Bonus Service не вызывает Ticket Service.
+        При отложенном возврате вызывается обработчиком очереди Gateway по HTTP с исходными
+        ticketUid и X-User-Name. Повторная доставка безопасна и не добавляет повторную запись истории.
+        Постоянная ошибка, включая неожиданную 404, не считается успешным выполнением задания.
       parameters:
       - $ref: '#/components/parameters/UserName'
       - $ref: '#/components/parameters/TicketUid'
@@ -509,8 +735,10 @@ paths:
       - Management
       operationId: getHealth
       summary: Проверить доступность сервиса
-      description: Одинаковый маршрут реализуется каждым сервисом. Для сервисов с БД готовность включает
-        возможность обращения к собственной БД. Заголовок пользователя не требуется.
+      description: |-
+        Одинаковый маршрут реализуется каждым сервисом. Для сервисов с БД готовность включает
+        возможность обращения к собственной БД. Health Gateway не проверяет доменные сервисы:
+        их временный отказ не делает сам Gateway недоступным. Заголовок пользователя не требуется.
       responses:
         '200':
           description: Сервис готов
@@ -597,6 +825,9 @@ components:
       - price
     TicketResponse:
       type: object
+      description: |-
+        Сведения Ticket Service сохраняются при отказе Flight Service.
+        В этом случае только fromAirport, toAirport и date заменяются строкой "Unavailable".
       example:
         ticketUid: 049161bb-badd-4fa8-9d90-87c9a82b0668
         flightNumber: AFL031
@@ -617,16 +848,20 @@ components:
           example: AFL031
         fromAirport:
           type: string
-          description: Город и аэропорт отправления
+          description: Город и аэропорт отправления; "Unavailable" при недоступности Flight Service
           example: Санкт-Петербург Пулково
         toAirport:
           type: string
-          description: Город и аэропорт прибытия
+          description: Город и аэропорт прибытия; "Unavailable" при недоступности Flight Service
           example: Москва Шереметьево
         date:
-          type: string
-          pattern: ^\d{4}-\d{2}-\d{2} \d{2}:\d{2}$
-          description: Дата вылета в Europe/Moscow, формат YYYY-MM-DD HH:mm
+          description: Дата вылета в Europe/Moscow, YYYY-MM-DD HH:mm; "Unavailable" при недоступности Flight
+          oneOf:
+          - type: string
+            pattern: ^\d{4}-\d{2}-\d{2} \d{2}:\d{2}$
+          - type: string
+            enum:
+            - Unavailable
           example: 2021-10-08 20:00
         price:
           type: integer
@@ -664,14 +899,25 @@ components:
       properties:
         tickets:
           type: array
-          description: Информация о билетах пользоватлея
+          description: Информация о билетах пользователя, включая fallback сведений Flight
           items:
             $ref: '#/components/schemas/TicketResponse'
         privilege:
-          $ref: '#/components/schemas/PrivilegeShortInfo'
+          $ref: '#/components/schemas/UserPrivilege'
       required:
       - tickets
       - privilege
+    UserPrivilege:
+      description: Данные Bonus Service; строго пустой объект при его временной недоступности
+      oneOf:
+      - $ref: '#/components/schemas/PrivilegeShortInfo'
+      - $ref: '#/components/schemas/EmptyPrivilege'
+    EmptyPrivilege:
+      type: object
+      description: Bonus Service недоступен; баланс и уровень привилегий неизвестны
+      additionalProperties: false
+      maxProperties: 0
+      example: {}
     PrivilegeShortInfo:
       type: object
       properties:
@@ -861,6 +1107,18 @@ components:
       required:
       - field
       - error
+    BonusServiceUnavailableError:
+      type: object
+      additionalProperties: false
+      required:
+      - message
+      properties:
+        message:
+          type: string
+          enum:
+          - Bonus Service unavailable
+      example:
+        message: Bonus Service unavailable
     ErrorResponse:
       type: object
       properties:
@@ -1044,6 +1302,27 @@ components:
         maximum: 100
         default: 10
   responses:
+    BonusServiceUnavailable:
+      description: |-
+        Bonus Service недоступен или вернул технически некорректный ответ.
+        Для чтения также применяется при открытом Circuit Breaker Bonus.
+        Статус 503 и точное тело ответа соответствуют приемочным тестам ЛР №3.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/BonusServiceUnavailableError'
+          example:
+            message: Bonus Service unavailable
+    RefundQueueUnavailable:
+      description: |-
+        Постановка бонусного возврата в очередь не подтверждена. Билет уже может иметь статус CANCELED;
+        бонусный возврат не гарантирован. Повторить DELETE с тем же ticketUid.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+          example:
+            message: Refund queue unavailable
     BadRequest:
       description: Неверный заголовок, UUID, параметры, JSON или бизнес-валидация
       content:
