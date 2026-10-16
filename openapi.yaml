@@ -1,0 +1,1088 @@
+openapi: 3.0.3
+info:
+  title: Flight Booking System — лабораторная работа №2, вариант 1
+  version: 1.0.0
+  description: |
+    Контракт четырех сервисов. Публичная точка входа — Gateway (8080).
+    Flight Service (8060), Ticket Service (8070) и Bonus Service (8050)
+    предоставляют внутренние API только для вызовов Gateway; горизонтальные вызовы запрещены.
+    Каждый сервис работает только со своей логической базой PostgreSQL. Gateway не имеет БД.
+    Заголовок X-User-Name идентифицирует пользователя в рамках учебного задания;
+    он не является механизмом аутентификации.
+
+    Решения, уточняющие неоднозначности шаблона:
+    * page нумеруется с 1; page=0 считается ошибкой валидации.
+    * Денежные суммы и бонусы — целые неотрицательные числа. Начисление — floor(price / 10).
+    * Новый бонусный счет автоматически создается с balance=0, status=BRONZE.
+      Переходы между уровнями привилегий не определены заданием и не выполняются автоматически.
+    * price в запросе покупки должен совпадать с актуальной ценой Flight Service.
+    * price в ответе — полная цена рейса до применения бонусов;
+      paidByMoney + paidByBonuses = price.
+    * Внешнее поле date рейса имеет формат YYYY-MM-DD HH:mm, как в примерах задания;
+      для тестового рейса используется Europe/Moscow. Время бонусных операций — RFC 3339 в UTC.
+    * balanceDiff — неотрицательная величина операции; направление задает operationType.
+    * Повторная отмена своего билета возвращает 204 без повторного изменения бонусов.
+    * Несуществующий и чужой билет одинаково возвращают 404.
+    * Возвращенные билеты сохраняются и включаются в список со статусом CANCELED.
+
+    Публичный API основан на исходном OpenAPI и Postman-коллекции v1.
+    Внутренние маршруты являются проектным решением для последующей реализации.
+servers:
+- url: http://localhost:8080
+  description: Gateway — публичный API
+paths:
+  /api/v1/flights:
+    get:
+      summary: Получить список рейсов
+      tags:
+      - Gateway API
+      parameters:
+      - $ref: '#/components/parameters/Page'
+      - $ref: '#/components/parameters/Size'
+      responses:
+        '200':
+          description: Список рейсов
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PaginationResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
+        '500':
+          $ref: '#/components/responses/InternalError'
+      operationId: listFlights
+      description: Стабильная сортировка по id рейса. За пределами списка возвращается 200 с пустым items.
+        Параметры page и size по умолчанию равны 1 и 10.
+  /api/v1/tickets:
+    get:
+      summary: Информация по всем билетам пользователя
+      tags:
+      - Gateway API
+      parameters:
+      - $ref: '#/components/parameters/UserName'
+      responses:
+        '200':
+          description: Информация по всем билетам
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/TicketResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
+        '500':
+          $ref: '#/components/responses/InternalError'
+      operationId: listUserTickets
+      description: Только билеты пользователя, включая CANCELED. При отсутствии билетов возвращается пустой
+        массив. Gateway дополняет их сведениями Flight Service.
+    post:
+      summary: Покупка билета
+      tags:
+      - Gateway API
+      parameters:
+      - $ref: '#/components/parameters/UserName'
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/TicketPurchaseRequest'
+        required: true
+      responses:
+        '200':
+          description: Информация о купленном билете
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TicketPurchaseResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
+        '500':
+          $ref: '#/components/responses/InternalError'
+      operationId: purchaseTicket
+      description: |-
+        Gateway проверяет существование рейса и совпадение цены; отсутствие рейса или неверная цена возвращают 400.
+        Создается билет PAID. При paidFromBalance=true списывается min(balance, price),
+        paidByMoney=price-paidByBonuses, новые бонусы не начисляются.
+        При false paidByMoney=price, paidByBonuses=0, начисляется floor(price/10).
+        Ответ содержит полную цену и бонусный баланс после операции.
+        Публичный POST не идемпотентен: новый запрос может создать новый билет.
+        Gateway генерирует один ticketUid и использует его для внутренних операций одной покупки.
+        При межсервисном сбое Gateway обязан согласовать результаты или выполнить компенсацию;
+        503 не гарантирует, что побочные эффекты отсутствуют.
+  /api/v1/tickets/{ticketUid}:
+    get:
+      summary: Информация по конкретному билету
+      tags:
+      - Gateway API
+      parameters:
+      - $ref: '#/components/parameters/UserName'
+      - $ref: '#/components/parameters/TicketUid'
+      responses:
+        '200':
+          description: Информация по конкретному билету
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TicketResponse'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
+        '500':
+          $ref: '#/components/responses/InternalError'
+      operationId: getUserTicket
+    delete:
+      summary: Возврат билета
+      tags:
+      - Gateway API
+      parameters:
+      - $ref: '#/components/parameters/UserName'
+      - $ref: '#/components/parameters/TicketUid'
+      responses:
+        '204':
+          description: Возврат билета успешно выполнен
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
+        '500':
+          $ref: '#/components/responses/InternalError'
+      operationId: cancelUserTicket
+      description: |-
+        Проверить владельца. Билет сохраняется со статусом CANCELED.
+        Вернуть ранее списанные бонусы либо снять начисленные, не опуская баланс ниже 0.
+        Повторный возврат своего билета — 204 без повторной бонусной операции.
+        При сбое повтор должен завершить согласование состояния Ticket и Bonus Service.
+  /api/v1/me:
+    get:
+      summary: Информация о пользователе
+      tags:
+      - Gateway API
+      parameters:
+      - $ref: '#/components/parameters/UserName'
+      responses:
+        '200':
+          description: Полная информация о пользователе
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/UserInfoResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
+        '500':
+          $ref: '#/components/responses/InternalError'
+      operationId: getUserInfo
+      description: Gateway объединяет билеты из Ticket Service, сведения о рейсах из Flight Service и
+        короткую информацию Bonus Service. История бонусов в privilege не включается.
+  /api/v1/privilege:
+    get:
+      summary: Получить информацию о состоянии бонусного счета
+      tags:
+      - Gateway API
+      parameters:
+      - $ref: '#/components/parameters/UserName'
+      responses:
+        '200':
+          description: Данные о бонусном счете
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PrivilegeInfoResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
+        '500':
+          $ref: '#/components/responses/InternalError'
+      operationId: getUserPrivilege
+      description: Счет отсутствующего пользователя создается с balance=0 и status=BRONZE. История упорядочена
+        по времени, затем id по возрастанию; включает покупки и обратные операции возврата.
+  /internal/v1/flights:
+    servers:
+    - url: http://localhost:8060
+      description: Flight Service
+    get:
+      tags:
+      - Flight Internal
+      operationId: internalListFlights
+      summary: Получить страницу рейсов
+      description: Те же правила пагинации и сортировки, что у публичного списка.
+      parameters:
+      - $ref: '#/components/parameters/Page'
+      - $ref: '#/components/parameters/Size'
+      responses:
+        '200':
+          description: Страница рейсов
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PaginationResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
+        '500':
+          $ref: '#/components/responses/InternalError'
+  /internal/v1/flights/{flightNumber}:
+    servers:
+    - url: http://localhost:8060
+      description: Flight Service
+    get:
+      tags:
+      - Flight Internal
+      operationId: internalGetFlight
+      summary: Найти рейс по номеру
+      description: Для набора данных лабораторной flightNumber однозначно определяет рейс.
+      parameters:
+      - $ref: '#/components/parameters/FlightNumber'
+      responses:
+        '200':
+          description: Сведения о рейсе
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/FlightResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
+        '500':
+          $ref: '#/components/responses/InternalError'
+        '404':
+          $ref: '#/components/responses/NotFound'
+  /internal/v1/tickets:
+    servers:
+    - url: http://localhost:8070
+      description: Ticket Service
+    get:
+      tags:
+      - Ticket Internal
+      operationId: internalListTickets
+      summary: Получить билеты пользователя
+      description: Фильтрация по владельцу обязательна. Включает CANCELED; стабильный порядок по id.
+      parameters:
+      - $ref: '#/components/parameters/UserName'
+      responses:
+        '200':
+          description: Билеты без сведений аэропортов
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/InternalTicketResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
+        '500':
+          $ref: '#/components/responses/InternalError'
+  /internal/v1/tickets/{ticketUid}:
+    servers:
+    - url: http://localhost:8070
+      description: Ticket Service
+    get:
+      tags:
+      - Ticket Internal
+      operationId: internalGetTicket
+      summary: Получить билет пользователя
+      description: Чужой и отсутствующий билет возвращают 404.
+      parameters:
+      - $ref: '#/components/parameters/UserName'
+      - $ref: '#/components/parameters/TicketUid'
+      responses:
+        '200':
+          description: Билет
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/InternalTicketResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
+        '500':
+          $ref: '#/components/responses/InternalError'
+        '404':
+          $ref: '#/components/responses/NotFound'
+    put:
+      tags:
+      - Ticket Internal
+      operationId: internalCreateTicket
+      summary: Идемпотентно создать билет с UUID от Gateway
+      description: Создает PAID. Одинаковые UUID, владелец и тело не создают дубликат. При изменении данных
+        — 409; чужой UUID — 404. Если билет уже CANCELED, возвращается его текущее состояние, повторно
+        активировать его нельзя. Проверку рейса предварительно выполняет Gateway.
+      parameters:
+      - $ref: '#/components/parameters/UserName'
+      - $ref: '#/components/parameters/TicketUid'
+      responses:
+        '201':
+          description: Билет создан
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/InternalTicketResponse'
+        '200':
+          description: 'Повтор: существующий билет'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/InternalTicketResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
+        '500':
+          $ref: '#/components/responses/InternalError'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/InternalTicketCreateRequest'
+  /internal/v1/tickets/{ticketUid}/cancellation:
+    servers:
+    - url: http://localhost:8070
+      description: Ticket Service
+    put:
+      tags:
+      - Ticket Internal
+      operationId: internalCancelTicket
+      summary: Идемпотентно пометить билет CANCELED
+      description: Изменяет только свою БД. Бонусы возвращает Gateway отдельным вызовом Bonus Service.
+        Чужой и отсутствующий билет — 404.
+      parameters:
+      - $ref: '#/components/parameters/UserName'
+      - $ref: '#/components/parameters/TicketUid'
+      responses:
+        '204':
+          description: Статус CANCELED установлен или уже был установлен
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
+        '500':
+          $ref: '#/components/responses/InternalError'
+        '404':
+          $ref: '#/components/responses/NotFound'
+  /internal/v1/privilege:
+    servers:
+    - url: http://localhost:8050
+      description: Bonus Service
+    get:
+      tags:
+      - Bonus Internal
+      operationId: internalGetPrivilege
+      summary: Получить или инициализировать бонусный счет
+      description: Для нового пользователя создается BRONZE, balance=0, history=[]. История по datetime
+        и id по возрастанию.
+      parameters:
+      - $ref: '#/components/parameters/UserName'
+      responses:
+        '200':
+          description: Бонусный счет и история
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PrivilegeInfoResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
+        '500':
+          $ref: '#/components/responses/InternalError'
+  /internal/v1/privilege/operations/{ticketUid}:
+    servers:
+    - url: http://localhost:8050
+      description: Bonus Service
+    put:
+      tags:
+      - Bonus Internal
+      operationId: internalApplyBonusOperation
+      summary: Идемпотентно применить бонусную операцию покупки
+      description: |-
+        Ключ — ticketUid и владелец. Счет при необходимости создается.
+        При true списать min(balance,price) и записать DEBIT_THE_ACCOUNT;
+        при false начислить floor(price/10) и записать FILL_IN_BALANCE.
+        Даже операция с величиной 0 регистрируется для идемпотентности.
+        Баланс, история, ключ операции и результат сохраняются атомарно.
+        Повтор с тем же телом возвращает сохраненный исходный результат, включая баланс на момент покупки,
+        без повторного изменения баланса. Иное тело либо уже отмененная операция — 409;
+        чужой ticketUid — 404. Параллельные операции не могут сделать баланс отрицательным.
+      parameters:
+      - $ref: '#/components/parameters/UserName'
+      - $ref: '#/components/parameters/TicketUid'
+      responses:
+        '201':
+          description: Операция применена
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/BonusOperationResponse'
+        '200':
+          description: 'Повтор: сохраненный результат исходной операции'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/BonusOperationResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
+        '500':
+          $ref: '#/components/responses/InternalError'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/BonusOperationRequest'
+  /internal/v1/privilege/operations/{ticketUid}/reversal:
+    servers:
+    - url: http://localhost:8050
+      description: Bonus Service
+    put:
+      tags:
+      - Bonus Internal
+      operationId: internalReverseBonusOperation
+      summary: Идемпотентно отменить бонусную операцию билета
+      description: |-
+        Возвращает списанные баллы (FILL_IN_BALANCE) или снимает начисленные
+        в размере min(currentBalance, originallyAccrued) (DEBIT_THE_ACCOUNT).
+        В историю добавляется одна обратная операция с фактической величиной изменения.
+        Баланс, история и отметка отмены сохраняются атомарно.
+        Повтор не изменяет баланс и возвращает его текущее состояние.
+        Неизвестная или чужая операция — 404. Используется Gateway при возврате
+        и для компенсации неуспешной покупки; Bonus Service не вызывает Ticket Service.
+      parameters:
+      - $ref: '#/components/parameters/UserName'
+      - $ref: '#/components/parameters/TicketUid'
+      responses:
+        '200':
+          description: Текущее состояние бонусного счета после отмены или повторного вызова
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PrivilegeShortInfo'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
+        '500':
+          $ref: '#/components/responses/InternalError'
+        '404':
+          $ref: '#/components/responses/NotFound'
+  /manage/health:
+    servers:
+    - url: http://localhost:8080
+      description: Gateway
+    - url: http://localhost:8050
+      description: Bonus Service
+    - url: http://localhost:8060
+      description: Flight Service
+    - url: http://localhost:8070
+      description: Ticket Service
+    get:
+      tags:
+      - Management
+      operationId: getHealth
+      summary: Проверить доступность сервиса
+      description: Одинаковый маршрут реализуется каждым сервисом. Для сервисов с БД готовность включает
+        возможность обращения к собственной БД. Заголовок пользователя не требуется.
+      responses:
+        '200':
+          description: Сервис готов
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HealthResponse'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
+components:
+  schemas:
+    PaginationResponse:
+      type: object
+      example:
+        page: 1
+        pageSize: 1
+        totalElements: 1
+        items:
+        - flightNumber: AFL031
+          fromAirport: Санкт-Петербург Пулково
+          toAirport: Москва Шереметьево
+          date: 2021-10-08 20:00
+          price: 1500
+      properties:
+        page:
+          type: integer
+          minimum: 1
+          description: Номер страницы, начиная с 1
+        pageSize:
+          type: integer
+          minimum: 1
+          maximum: 100
+          description: Запрошенный размер страницы
+        totalElements:
+          type: integer
+          format: int64
+          minimum: 0
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/FlightResponse'
+      required:
+      - page
+      - pageSize
+      - totalElements
+      - items
+    FlightResponse:
+      type: object
+      example:
+        flightNumber: AFL031
+        fromAirport: Санкт-Петербург Пулково
+        toAirport: Москва Шереметьево
+        date: 2021-10-08 20:00
+        price: 1500
+      properties:
+        flightNumber:
+          type: string
+          minLength: 1
+          maxLength: 20
+          example: AFL031
+        fromAirport:
+          type: string
+          description: Город и аэропорт отправления
+          example: Санкт-Петербург Пулково
+        toAirport:
+          type: string
+          description: Город и аэропорт прибытия
+          example: Москва Шереметьево
+        date:
+          type: string
+          pattern: ^\d{4}-\d{2}-\d{2} \d{2}:\d{2}$
+          description: Дата вылета в Europe/Moscow, формат YYYY-MM-DD HH:mm
+          example: 2021-10-08 20:00
+        price:
+          type: integer
+          format: int32
+          minimum: 0
+          description: Полная стоимость рейса в рублях до применения бонусов
+      required:
+      - flightNumber
+      - fromAirport
+      - toAirport
+      - date
+      - price
+    TicketResponse:
+      type: object
+      example:
+        ticketUid: 049161bb-badd-4fa8-9d90-87c9a82b0668
+        flightNumber: AFL031
+        fromAirport: Санкт-Петербург Пулково
+        toAirport: Москва Шереметьево
+        date: 2021-10-08 20:00
+        price: 1500
+        status: PAID
+      properties:
+        ticketUid:
+          type: string
+          format: uuid
+          example: 049161bb-badd-4fa8-9d90-87c9a82b0668
+        flightNumber:
+          type: string
+          minLength: 1
+          maxLength: 20
+          example: AFL031
+        fromAirport:
+          type: string
+          description: Город и аэропорт отправления
+          example: Санкт-Петербург Пулково
+        toAirport:
+          type: string
+          description: Город и аэропорт прибытия
+          example: Москва Шереметьево
+        date:
+          type: string
+          pattern: ^\d{4}-\d{2}-\d{2} \d{2}:\d{2}$
+          description: Дата вылета в Europe/Moscow, формат YYYY-MM-DD HH:mm
+          example: 2021-10-08 20:00
+        price:
+          type: integer
+          format: int32
+          minimum: 0
+          description: Полная стоимость рейса в рублях до применения бонусов
+        status:
+          type: string
+          description: Статус билета
+          enum:
+          - PAID
+          - CANCELED
+      required:
+      - ticketUid
+      - flightNumber
+      - fromAirport
+      - toAirport
+      - date
+      - price
+      - status
+    UserInfoResponse:
+      type: object
+      example:
+        tickets:
+        - ticketUid: 049161bb-badd-4fa8-9d90-87c9a82b0668
+          flightNumber: AFL031
+          fromAirport: Санкт-Петербург Пулково
+          toAirport: Москва Шереметьево
+          date: 2021-10-08 20:00
+          price: 1500
+          status: PAID
+        privilege:
+          balance: 1500
+          status: GOLD
+      properties:
+        tickets:
+          type: array
+          description: Информация о билетах пользоватлея
+          items:
+            $ref: '#/components/schemas/TicketResponse'
+        privilege:
+          $ref: '#/components/schemas/PrivilegeShortInfo'
+      required:
+      - tickets
+      - privilege
+    PrivilegeShortInfo:
+      type: object
+      properties:
+        balance:
+          type: integer
+          format: int32
+          minimum: 0
+          description: Баланс бонусного счета, 1 балл = 1 рубль
+        status:
+          type: string
+          description: Уровень бонусной программы; новый пользователь — BRONZE
+          enum:
+          - BRONZE
+          - SILVER
+          - GOLD
+      required:
+      - balance
+      - status
+      example:
+        balance: 150
+        status: BRONZE
+    PrivilegeInfoResponse:
+      type: object
+      example:
+        balance: 1500
+        status: GOLD
+        history:
+        - date: '2021-10-08T19:59:19Z'
+          ticketUid: 049161bb-badd-4fa8-9d90-87c9a82b0668
+          balanceDiff: 1500
+          operationType: FILL_IN_BALANCE
+      properties:
+        balance:
+          type: integer
+          format: int32
+          minimum: 0
+          description: Баланс бонусного счета, 1 балл = 1 рубль
+        status:
+          type: string
+          description: Уровень бонусной программы; новый пользователь — BRONZE
+          enum:
+          - BRONZE
+          - SILVER
+          - GOLD
+        history:
+          type: array
+          description: История изменения баланса
+          items:
+            $ref: '#/components/schemas/BalanceHistory'
+      required:
+      - balance
+      - status
+      - history
+    BalanceHistory:
+      type: object
+      example:
+        date: '2021-10-08T19:59:19Z'
+        ticketUid: 049161bb-badd-4fa8-9d90-87c9a82b0668
+        balanceDiff: 1500
+        operationType: FILL_IN_BALANCE
+      properties:
+        date:
+          type: string
+          format: date-time
+          description: Момент операции в UTC
+          example: '2021-10-08T19:59:19Z'
+        balanceDiff:
+          type: integer
+          format: int32
+          minimum: 0
+          description: Величина изменения; направление определяется operationType
+        ticketUid:
+          type: string
+          format: uuid
+          example: 049161bb-badd-4fa8-9d90-87c9a82b0668
+        operationType:
+          type: string
+          enum:
+          - FILL_IN_BALANCE
+          - DEBIT_THE_ACCOUNT
+      required:
+      - date
+      - balanceDiff
+      - ticketUid
+      - operationType
+    TicketPurchaseRequest:
+      type: object
+      example:
+        flightNumber: AFL031
+        price: 1500
+        paidFromBalance: true
+      properties:
+        flightNumber:
+          type: string
+          minLength: 1
+          maxLength: 20
+          example: AFL031
+        price:
+          type: integer
+          format: int32
+          minimum: 0
+          description: Должна совпадать с актуальной ценой рейса
+        paidFromBalance:
+          type: boolean
+          description: Списать максимально возможное количество бонусов; начисление при true не производится
+      required:
+      - flightNumber
+      - price
+      - paidFromBalance
+    TicketPurchaseResponse:
+      type: object
+      example:
+        ticketUid: 049161bb-badd-4fa8-9d90-87c9a82b0668
+        flightNumber: AFL031
+        fromAirport: Санкт-Петербург Пулково
+        toAirport: Москва Шереметьево
+        date: 2021-10-08 20:00
+        price: 1500
+        paidByMoney: 1500
+        paidByBonuses: 0
+        status: PAID
+        privilege:
+          balance: 150
+          status: BRONZE
+      properties:
+        ticketUid:
+          type: string
+          format: uuid
+          example: 049161bb-badd-4fa8-9d90-87c9a82b0668
+        flightNumber:
+          type: string
+          minLength: 1
+          maxLength: 20
+          example: AFL031
+        fromAirport:
+          type: string
+          description: Город и аэропорт отправления
+          example: Санкт-Петербург Пулково
+        toAirport:
+          type: string
+          description: Город и аэропорт прибытия
+          example: Москва Шереметьево
+        date:
+          type: string
+          pattern: ^\d{4}-\d{2}-\d{2} \d{2}:\d{2}$
+          description: Дата вылета в Europe/Moscow, формат YYYY-MM-DD HH:mm
+          example: 2021-10-08 20:00
+        status:
+          type: string
+          description: Статус билета
+          enum:
+          - PAID
+          - CANCELED
+        price:
+          type: integer
+          format: int32
+          minimum: 0
+          description: Полная стоимость рейса в рублях до применения бонусов
+        paidByMoney:
+          type: integer
+          format: int32
+          minimum: 0
+        paidByBonuses:
+          type: integer
+          format: int32
+          minimum: 0
+        privilege:
+          $ref: '#/components/schemas/PrivilegeShortInfo'
+      required:
+      - ticketUid
+      - flightNumber
+      - fromAirport
+      - toAirport
+      - date
+      - status
+      - price
+      - paidByMoney
+      - paidByBonuses
+      - privilege
+    ErrorDescription:
+      type: object
+      properties:
+        field:
+          type: string
+        error:
+          type: string
+      required:
+      - field
+      - error
+    ErrorResponse:
+      type: object
+      properties:
+        message:
+          type: string
+          description: Информация об ошибке
+      required:
+      - message
+      example:
+        message: Билет не найден
+    ValidationErrorResponse:
+      type: object
+      properties:
+        message:
+          type: string
+          description: Информация об ошибке
+        errors:
+          type: array
+          description: Массив полей с описанием ошибки
+          items:
+            $ref: '#/components/schemas/ErrorDescription'
+      required:
+      - message
+      - errors
+      example:
+        message: Ошибка валидации данных
+        errors:
+        - field: price
+          error: Цена должна быть неотрицательным целым числом
+    HealthResponse:
+      type: object
+      required:
+      - status
+      properties:
+        status:
+          type: string
+          enum:
+          - UP
+      example:
+        status: UP
+    InternalTicketResponse:
+      type: object
+      required:
+      - ticketUid
+      - username
+      - flightNumber
+      - price
+      - status
+      properties:
+        ticketUid:
+          type: string
+          format: uuid
+          example: 049161bb-badd-4fa8-9d90-87c9a82b0668
+        username:
+          type: string
+          minLength: 1
+          maxLength: 80
+        flightNumber:
+          type: string
+          minLength: 1
+          maxLength: 20
+          example: AFL031
+        price:
+          type: integer
+          format: int32
+          minimum: 0
+        status:
+          type: string
+          enum:
+          - PAID
+          - CANCELED
+    InternalTicketCreateRequest:
+      type: object
+      required:
+      - flightNumber
+      - price
+      properties:
+        flightNumber:
+          type: string
+          minLength: 1
+          maxLength: 20
+          example: AFL031
+        price:
+          type: integer
+          format: int32
+          minimum: 0
+    BonusOperationRequest:
+      type: object
+      required:
+      - price
+      - paidFromBalance
+      properties:
+        price:
+          type: integer
+          format: int32
+          minimum: 0
+          description: Полная цена билета, проверенная Gateway
+        paidFromBalance:
+          type: boolean
+    BonusOperationResponse:
+      type: object
+      required:
+      - ticketUid
+      - price
+      - paidByMoney
+      - paidByBonuses
+      - privilege
+      properties:
+        ticketUid:
+          type: string
+          format: uuid
+          example: 049161bb-badd-4fa8-9d90-87c9a82b0668
+        price:
+          type: integer
+          format: int32
+          minimum: 0
+        paidByMoney:
+          type: integer
+          format: int32
+          minimum: 0
+        paidByBonuses:
+          type: integer
+          format: int32
+          minimum: 0
+        privilege:
+          $ref: '#/components/schemas/PrivilegeShortInfo'
+      example:
+        ticketUid: 049161bb-badd-4fa8-9d90-87c9a82b0668
+        price: 1500
+        paidByMoney: 1000
+        paidByBonuses: 500
+        privilege:
+          balance: 0
+          status: BRONZE
+  parameters:
+    UserName:
+      name: X-User-Name
+      in: header
+      required: true
+      description: Имя пользователя. Пустая строка и строка только из пробелов недопустимы.
+      schema:
+        type: string
+        minLength: 1
+        maxLength: 80
+        pattern: .*\S.*
+      example: Test Max
+    TicketUid:
+      name: ticketUid
+      in: path
+      required: true
+      description: UUID билета, также ключ идемпотентности внутренних операций
+      schema:
+        type: string
+        format: uuid
+        example: 049161bb-badd-4fa8-9d90-87c9a82b0668
+    FlightNumber:
+      name: flightNumber
+      in: path
+      required: true
+      schema:
+        type: string
+        minLength: 1
+        maxLength: 20
+        example: AFL031
+    Page:
+      name: page
+      in: query
+      required: false
+      description: Номер страницы, начиная с 1
+      schema:
+        type: integer
+        minimum: 1
+        default: 1
+    Size:
+      name: size
+      in: query
+      required: false
+      schema:
+        type: integer
+        minimum: 1
+        maximum: 100
+        default: 10
+  responses:
+    BadRequest:
+      description: Неверный заголовок, UUID, параметры, JSON или бизнес-валидация
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ValidationErrorResponse'
+    NotFound:
+      description: Ресурс не найден; чужой билет также возвращает 404
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+    Conflict:
+      description: 'Конфликт: ключ операции уже использован с другими данными или операция уже отменена'
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+    ServiceUnavailable:
+      description: Зависимый сервис или собственная БД недоступны. Повтор допустим для идемпотентных внутренних
+        операций.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+    InternalError:
+      description: Внутренняя ошибка сервиса
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+tags:
+- name: Gateway API
+  description: Публичные маршруты клиента
+- name: Flight Internal
+  description: Внутренние маршруты Flight Service, вызываемые Gateway
+- name: Ticket Internal
+  description: Внутренние маршруты Ticket Service, вызываемые Gateway
+- name: Bonus Internal
+  description: Внутренние маршруты Bonus Service, вызываемые Gateway
+- name: Management
+  description: Проверка доступности каждого сервиса

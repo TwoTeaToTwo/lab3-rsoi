@@ -1,20 +1,154 @@
-version: "3"
 services:
   postgres:
     image: library/postgres:13
-    container_name: postgres
     restart: on-failure
     environment:
       POSTGRES_USER: postgres
-      POSTGRES_PASSWORD: "postgres"
+      POSTGRES_PASSWORD: "${POSTGRES_PASSWORD:-postgres}"
       POSTGRES_DB: postgres
+      BONUS_DB_PASSWORD: "${BONUS_DB_PASSWORD:-test}"
+      TICKET_DB_PASSWORD: "${TICKET_DB_PASSWORD:-test}"
+      FLIGHT_DB_PASSWORD: "${FLIGHT_DB_PASSWORD:-test}"
     volumes:
       - db-data:/var/lib/postgresql/data
-      - ./postgres/:/docker-entrypoint-initdb.d/
+      - ./postgres/:/docker-entrypoint-initdb.d/:ro
     ports:
-      - "5432:5432"
+      - "${POSTGRES_PORT:-5432}:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d postgres -h 127.0.0.1"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+      start_period: 10s
 
-# TODO добавить сервисы
+  postgres-init:
+    image: library/postgres:13
+    restart: "no"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      PGHOST: postgres
+      PGUSER: postgres
+      PGDATABASE: postgres
+      PGPASSWORD: "${POSTGRES_PASSWORD:-postgres}"
+      BONUS_DB_PASSWORD: "${BONUS_DB_PASSWORD:-test}"
+      TICKET_DB_PASSWORD: "${TICKET_DB_PASSWORD:-test}"
+      FLIGHT_DB_PASSWORD: "${FLIGHT_DB_PASSWORD:-test}"
+    volumes:
+      - ./postgres/:/docker-entrypoint-initdb.d/:ro
+    entrypoint: ["bash", "/docker-entrypoint-initdb.d/20-create-databases.sh"]
+
+  bonus-service:
+    build:
+      context: .
+      dockerfile: services/bonus-service/Dockerfile
+      network: "${BONUS_BUILD_NETWORK:-default}"
+    restart: on-failure
+    depends_on:
+      postgres:
+        condition: service_healthy
+      postgres-init:
+        condition: service_completed_successfully
+    environment:
+      BONUS_DB_PASSWORD: "${BONUS_DB_PASSWORD:-test}"
+      BONUS_HOST: 0.0.0.0
+      BONUS_PORT: "8050"
+    ports:
+      - "${BONUS_PORT:-8050}:8050"
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8050/manage/health', timeout=3)"
+      interval: 5s
+      timeout: 5s
+      retries: 20
+      start_period: 15s
+
+  ticket-service:
+    build:
+      context: .
+      dockerfile: services/ticket-service/Dockerfile
+      network: "${TICKET_BUILD_NETWORK:-default}"
+    restart: on-failure
+    depends_on:
+      postgres:
+        condition: service_healthy
+      postgres-init:
+        condition: service_completed_successfully
+    environment:
+      TICKET_DB_PASSWORD: "${TICKET_DB_PASSWORD:-test}"
+      TICKET_HOST: 0.0.0.0
+      TICKET_PORT: "8070"
+    ports:
+      - "${TICKET_PORT:-8070}:8070"
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8070/manage/health', timeout=3)"
+      interval: 5s
+      timeout: 5s
+      retries: 20
+      start_period: 15s
+
+  flight-service:
+    build:
+      context: .
+      dockerfile: services/flight-service/Dockerfile
+      network: "${FLIGHT_BUILD_NETWORK:-default}"
+    restart: on-failure
+    depends_on:
+      postgres:
+        condition: service_healthy
+      postgres-init:
+        condition: service_completed_successfully
+    environment:
+      FLIGHT_DB_PASSWORD: "${FLIGHT_DB_PASSWORD:-test}"
+      FLIGHT_HOST: 0.0.0.0
+      FLIGHT_PORT: "8060"
+    ports:
+      - "${FLIGHT_PORT:-8060}:8060"
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8060/manage/health', timeout=3)"
+      interval: 5s
+      timeout: 5s
+      retries: 20
+      start_period: 15s
+
+  gateway:
+    build:
+      context: .
+      dockerfile: services/gateway/Dockerfile
+      network: "${GATEWAY_BUILD_NETWORK:-default}"
+    restart: on-failure
+    depends_on:
+      flight-service:
+        condition: service_healthy
+      ticket-service:
+        condition: service_healthy
+      bonus-service:
+        condition: service_healthy
+    environment:
+      GATEWAY_FLIGHT_URL: http://flight-service:8060
+      GATEWAY_TICKET_URL: http://ticket-service:8070
+      GATEWAY_BONUS_URL: http://bonus-service:8050
+      GATEWAY_PORT: "8080"
+    ports:
+      - "${GATEWAY_PORT:-8080}:8080"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/manage/health', timeout=3)"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+      start_period: 10s
 
 volumes:
   db-data:
