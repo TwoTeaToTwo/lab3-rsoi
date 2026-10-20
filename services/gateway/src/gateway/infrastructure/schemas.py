@@ -111,25 +111,3 @@ class PaymentDTO(ApiModel):
             self.paid_by_bonuses,
             self.privilege.to_domain(),
         )
-
-
-class PublicTicketDTO(FlightDTO):
-    ticket_uid: UUID
-    status: TicketStatus
-
-
-class PurchaseDTO(PublicTicketDTO):
-    paid_by_money: Amount
-    paid_by_bonuses: Amount
-    privilege: PrivilegeDTO
-
-
-class UserDTO(ApiModel):
-    tickets: list[PublicTicketDTO]
-    privilege: PrivilegeDTO
-
-
-class PurchaseRequest(ApiModel):
-    flight_number: FlightNumber
-    price: Amount
-    paid_from_balance: Annotated[bool, Field(strict=True)]

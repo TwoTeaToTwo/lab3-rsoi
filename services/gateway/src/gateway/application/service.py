@@ -3,7 +3,13 @@ import logging
 from uuid import UUID, uuid4
 
 from gateway.application.ports import BonusClient, FlightClient, TicketClient
-from gateway.domain.errors import InvalidInput, NotFound, Unavailable
+from gateway.domain.errors import (
+    InvalidInput,
+    NotFound,
+    Unavailable,
+    UpstreamRejected,
+    UpstreamUnavailable,
+)
 from gateway.domain.models import (
     Account,
     Flight,
@@ -37,21 +43,34 @@ class GatewayService:
             raise NotFound("Ticket not found")
 
     @staticmethod
-    def _info(ticket: Ticket, flight: Flight) -> TicketInfo:
+    def _info(ticket: Ticket, flight: Flight | None) -> TicketInfo:
         return TicketInfo(
-            flight.flight_number,
-            flight.from_airport,
-            flight.to_airport,
-            flight.date,
+            ticket.flight_number,
+            flight.from_airport if flight is not None else "Unavailable",
+            flight.to_airport if flight is not None else "Unavailable",
+            flight.date if flight is not None else "Unavailable",
             ticket.price,
             ticket.ticket_uid,
             ticket.status,
         )
 
+    async def _optional_flight(self, number: str) -> Flight | None:
+        try:
+            return await self._flights.get_flight(number)
+        except Unavailable:
+            return None
+
+    async def _optional_privilege(self, username: str) -> Privilege | None:
+        try:
+            account = await self.get_privilege(username)
+        except Unavailable:
+            return None
+        return Privilege(account.balance, account.status)
+
     async def get_ticket(self, username: str, uid: UUID) -> TicketInfo:
         ticket = await self._tickets.get_ticket(username, uid)
         self._owned(ticket, username)
-        flight = await self._flights.get_flight(ticket.flight_number)
+        flight = await self._optional_flight(ticket.flight_number)
         return self._info(ticket, flight)
 
     async def list_tickets(self, username: str) -> tuple[TicketInfo, ...]:
@@ -59,15 +78,15 @@ class GatewayService:
         for ticket in tickets:
             self._owned(ticket, username)
         numbers = list(dict.fromkeys(ticket.flight_number for ticket in tickets))
-        flights = await asyncio.gather(*[self._flights.get_flight(number) for number in numbers])
+        flights = await asyncio.gather(*[self._optional_flight(number) for number in numbers])
         by_number = dict(zip(numbers, flights, strict=True))
         return tuple(self._info(ticket, by_number[ticket.flight_number]) for ticket in tickets)
 
     async def get_user(self, username: str) -> UserInfo:
-        tickets, account = await asyncio.gather(
-            self.list_tickets(username), self.get_privilege(username)
+        tickets, privilege = await asyncio.gather(
+            self.list_tickets(username), self._optional_privilege(username)
         )
-        return UserInfo(tickets, Privilege(account.balance, account.status))
+        return UserInfo(tickets, privilege)
 
     async def purchase(
         self, username: str, number: str, price: int, paid_from_balance: bool
@@ -83,10 +102,10 @@ class GatewayService:
             ticket = await self._tickets.create_ticket(username, uid, number, price)
             self._owned(ticket, username)
             if ticket.status != "PAID":
-                raise Unavailable("Ticket is already canceled")
+                raise UpstreamUnavailable("Ticket")
             payment = await self._bonus.apply_purchase(username, uid, price, paid_from_balance)
             if payment.ticket_uid != uid or payment.price != price:
-                raise Unavailable("Invalid payment response")
+                raise UpstreamUnavailable("Bonus")
             result = PurchaseResult(
                 number,
                 flight.from_airport,
@@ -102,10 +121,10 @@ class GatewayService:
         except asyncio.CancelledError:
             self._pending[uid] = username
             raise
-        except (Unavailable, NotFound):
+        except (Unavailable, NotFound, UpstreamRejected):
             self._pending[uid] = username
             await self._compensate(uid, username)
-            raise Unavailable("Purchase could not be completed") from None
+            raise
         else:
             self._pending.pop(uid, None)
             return result

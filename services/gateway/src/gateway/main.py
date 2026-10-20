@@ -11,9 +11,16 @@ from fastapi.responses import JSONResponse
 
 from gateway.application.service import GatewayService
 from gateway.config import Settings
-from gateway.domain.errors import GatewayError, InvalidInput, NotFound
+from gateway.domain.errors import (
+    GatewayError,
+    InvalidInput,
+    NotFound,
+    UpstreamRejected,
+    UpstreamUnavailable,
+)
 from gateway.infrastructure.http import HttpBonusClient, HttpFlightClient, HttpTicketClient
-from gateway.presentation.api import ErrorDescription, ErrorDTO, ValidationErrorDTO, create_router
+from gateway.presentation.api import create_router
+from gateway.presentation.schemas import ErrorDescription, ErrorDTO, ValidationErrorDTO
 
 logger = logging.getLogger(__name__)
 
@@ -59,7 +66,7 @@ def create_app(service: GatewayService | None = None) -> FastAPI:
             for client in clients:
                 await client.aclose()
 
-    app = FastAPI(title="Flight Booking Gateway", version="0.1.0", lifespan=lifespan)
+    app = FastAPI(title="Flight Booking Gateway", version="2.0.0", lifespan=lifespan)
     app.include_router(create_router(service))
 
     @app.exception_handler(RequestValidationError)
@@ -77,14 +84,27 @@ def create_app(service: GatewayService | None = None) -> FastAPI:
 
     @app.exception_handler(GatewayError)
     async def business_error(request: Request, error: GatewayError) -> JSONResponse:
+        if isinstance(error, UpstreamRejected):
+            if error.status_code == 400:
+                validation = ValidationErrorDTO(
+                    message="Validation failed",
+                    errors=[ErrorDescription(field="request", error=str(error))],
+                )
+                return JSONResponse(status_code=400, content=validation.model_dump())
+            return JSONResponse(
+                status_code=error.status_code, content=ErrorDTO(message=str(error)).model_dump()
+            )
         if isinstance(error, InvalidInput):
             body = ValidationErrorDTO(
                 message="Validation failed",
                 errors=[ErrorDescription(field=error.field, error=str(error))],
             )
             return JSONResponse(status_code=400, content=body.model_dump())
+        status_code = 404 if isinstance(error, NotFound) else 503
+        if isinstance(error, UpstreamUnavailable) and error.service != "Bonus":
+            status_code = 500
         return JSONResponse(
-            status_code=404 if isinstance(error, NotFound) else 503,
+            status_code=status_code,
             content=ErrorDTO(message=str(error)).model_dump(),
         )
 

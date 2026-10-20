@@ -63,13 +63,20 @@ class Payment:
 
 
 @dataclass(frozen=True)
-class TicketInfo(Flight):
+class TicketInfo:
+    flight_number: str
+    from_airport: str
+    to_airport: str
+    date: str
+    price: int
     ticket_uid: UUID
     status: TicketStatus
 
 
 @dataclass(frozen=True)
-class PurchaseResult(TicketInfo):
+class PurchaseResult(Flight):
+    ticket_uid: UUID
+    status: TicketStatus
     paid_by_money: int
     paid_by_bonuses: int
     privilege: Privilege
@@ -78,4 +85,4 @@ class PurchaseResult(TicketInfo):
 @dataclass(frozen=True)
 class UserInfo:
     tickets: tuple[TicketInfo, ...]
-    privilege: Privilege
+    privilege: Privilege | None

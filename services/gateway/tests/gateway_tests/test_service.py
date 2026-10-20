@@ -85,7 +85,8 @@ async def test_purchase_and_user_aggregation(services: Services) -> None:
     assert result.paid_by_money == 1500 and result.paid_by_bonuses == 0
     assert result.privilege.balance == 150
     user = await service.get_user("alice")
-    assert user.privilege.balance == 150 and len(user.tickets) == 1
+    assert user.privilege is not None and user.privilege.balance == 150
+    assert len(user.tickets) == 1
     assert user.tickets[0].from_airport == FLIGHT.from_airport
     assert (await service.get_ticket("alice", result.ticket_uid)) == user.tickets[0]
 

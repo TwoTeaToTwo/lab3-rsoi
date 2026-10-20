@@ -5,7 +5,7 @@ from uuid import UUID
 import httpx
 from pydantic import TypeAdapter, ValidationError
 
-from gateway.domain.errors import NotFound, Unavailable
+from gateway.domain.errors import NotFound, ServiceName, UpstreamRejected, UpstreamUnavailable
 from gateway.domain.models import Account, Flight, FlightPage, Payment, Ticket
 from gateway.infrastructure.schemas import (
     AccountDTO,
@@ -18,6 +18,8 @@ from gateway.infrastructure.schemas import (
 
 
 class HttpAdapter:
+    service_name: ServiceName
+
     def __init__(self, client: httpx.AsyncClient, retries: int = 2) -> None:
         self._client, self._retries = client, retries
 
@@ -29,7 +31,8 @@ class HttpAdapter:
         body: dict[str, object] | None = None,
         params: dict[str, int] | None = None,
     ) -> httpx.Response:
-        for attempt in range(self._retries + 1):
+        retries = 0 if method == "GET" else self._retries
+        for attempt in range(retries + 1):
             try:
                 response = await self._client.request(
                     method,
@@ -40,15 +43,15 @@ class HttpAdapter:
                 )
                 if response.status_code == 404:
                     raise NotFound("Resource not found")
-                if response.status_code < 500:
-                    if response.status_code >= 300:
-                        raise Unavailable("Dependent service rejected the operation")
+                if 400 <= response.status_code < 500:
+                    raise UpstreamRejected(self.service_name, response.status_code)
+                if 200 <= response.status_code < 300:
                     return response
             except httpx.RequestError:
                 pass
-            if attempt < self._retries:
+            if attempt < retries:
                 await asyncio.sleep(0.1 * (attempt + 1))
-        raise Unavailable("Dependent service unavailable")
+        raise UpstreamUnavailable(self.service_name)
 
     async def read[T](
         self,
@@ -63,10 +66,12 @@ class HttpAdapter:
         try:
             return schema.validate_json(response.content)
         except ValidationError as error:
-            raise Unavailable("Invalid dependent service response") from error
+            raise UpstreamUnavailable(self.service_name) from error
 
 
 class HttpFlightClient(HttpAdapter):
+    service_name: ServiceName = "Flight"
+
     async def list_flights(self, page: int, size: int) -> FlightPage:
         result = await self.read(
             TypeAdapter(FlightPageDTO),
@@ -81,11 +86,13 @@ class HttpFlightClient(HttpAdapter):
             TypeAdapter(FlightDTO), "GET", "/internal/v1/flights/" + quote(number, safe="")
         )
         if result.flight_number != number:
-            raise Unavailable("Invalid flight response")
+            raise UpstreamUnavailable(self.service_name)
         return result.to_domain()
 
 
 class HttpTicketClient(HttpAdapter):
+    service_name: ServiceName = "Ticket"
+
     async def list_tickets(self, username: str) -> tuple[Ticket, ...]:
         result = await self.read(
             TypeAdapter(list[TicketDTO]), "GET", "/internal/v1/tickets", username
@@ -97,7 +104,7 @@ class HttpTicketClient(HttpAdapter):
             TypeAdapter(TicketDTO), "GET", f"/internal/v1/tickets/{uid}", username
         )
         if result.ticket_uid != uid:
-            raise Unavailable("Invalid ticket response")
+            raise UpstreamUnavailable(self.service_name)
         return result.to_domain()
 
     async def create_ticket(self, username: str, uid: UUID, number: str, price: int) -> Ticket:
@@ -109,16 +116,18 @@ class HttpTicketClient(HttpAdapter):
             {"flightNumber": number, "price": price},
         )
         if result.ticket_uid != uid or result.flight_number != number or result.price != price:
-            raise Unavailable("Invalid ticket response")
+            raise UpstreamUnavailable(self.service_name)
         return result.to_domain()
 
     async def cancel_ticket(self, username: str, uid: UUID) -> None:
         response = await self.request("PUT", f"/internal/v1/tickets/{uid}/cancellation", username)
         if response.status_code != 204 or response.content:
-            raise Unavailable("Invalid cancellation response")
+            raise UpstreamUnavailable(self.service_name)
 
 
 class HttpBonusClient(HttpAdapter):
+    service_name: ServiceName = "Bonus"
+
     async def get_account(self, username: str) -> Account:
         return (
             await self.read(TypeAdapter(AccountDTO), "GET", "/internal/v1/privilege", username)

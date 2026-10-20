@@ -76,6 +76,8 @@ paths:
                 $ref: '#/components/schemas/PaginationResponse'
         '400':
           $ref: '#/components/responses/BadRequest'
+        '4XX':
+          $ref: '#/components/responses/UpstreamRejected'
         '500':
           description: Недоступен критичный источник (Flight) или произошла внутренняя ошибка Gateway
           content:
@@ -134,6 +136,8 @@ paths:
                     status: PAID
         '400':
           $ref: '#/components/responses/BadRequest'
+        '4XX':
+          $ref: '#/components/responses/UpstreamRejected'
         '500':
           description: Недоступен критичный источник (Ticket) или произошла внутренняя ошибка Gateway
           content:
@@ -175,6 +179,8 @@ paths:
                 $ref: '#/components/schemas/TicketPurchaseResponse'
         '400':
           $ref: '#/components/responses/BadRequest'
+        '4XX':
+          $ref: '#/components/responses/UpstreamRejected'
         '503':
           $ref: '#/components/responses/BonusServiceUnavailable'
         '500':
@@ -250,6 +256,8 @@ paths:
           $ref: '#/components/responses/NotFound'
         '400':
           $ref: '#/components/responses/BadRequest'
+        '4XX':
+          $ref: '#/components/responses/UpstreamRejected'
         '500':
           description: Недоступен критичный источник (Ticket) или произошла внутренняя ошибка Gateway
           content:
@@ -285,6 +293,8 @@ paths:
           $ref: '#/components/responses/NotFound'
         '400':
           $ref: '#/components/responses/BadRequest'
+        '4XX':
+          $ref: '#/components/responses/UpstreamRejected'
         '503':
           $ref: '#/components/responses/RefundQueueUnavailable'
         '500':
@@ -382,6 +392,8 @@ paths:
                     privilege: {}
         '400':
           $ref: '#/components/responses/BadRequest'
+        '4XX':
+          $ref: '#/components/responses/UpstreamRejected'
         '500':
           description: Недоступен критичный источник (Ticket) или произошла внутренняя ошибка Gateway
           content:
@@ -420,6 +432,8 @@ paths:
                 $ref: '#/components/schemas/PrivilegeInfoResponse'
         '400':
           $ref: '#/components/responses/BadRequest'
+        '4XX':
+          $ref: '#/components/responses/UpstreamRejected'
         '503':
           $ref: '#/components/responses/BonusServiceUnavailable'
         '500':
@@ -1302,6 +1316,15 @@ components:
         maximum: 100
         default: 10
   responses:
+    UpstreamRejected:
+      description: |-
+        Бизнес-ошибка зависимого сервиса передается с исходным кодом 4xx и не подменяется fallback.
+        Для 400 возвращается ValidationErrorResponse; для 404 и других 4xx — ErrorResponse.
+        Технические подробности ответа зависимого сервиса клиенту не раскрываются.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
     BonusServiceUnavailable:
       description: |-
         Bonus Service недоступен или вернул технически некорректный ответ.
