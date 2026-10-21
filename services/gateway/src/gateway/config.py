@@ -14,3 +14,5 @@ class Settings(BaseSettings):
     write_timeout: float = Field(default=5, gt=0)
     pool_timeout: float = Field(default=2, gt=0)
     retries: int = Field(default=2, ge=0, le=5)
+    circuit_breaker_n: int = Field(default=3, ge=0)
+    circuit_breaker_recovery_timeout: float = Field(default=5, gt=0, allow_inf_nan=False)

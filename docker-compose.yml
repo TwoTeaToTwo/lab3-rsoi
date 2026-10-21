@@ -141,6 +141,8 @@ services:
       GATEWAY_TICKET_URL: http://ticket-service:8070
       GATEWAY_BONUS_URL: http://bonus-service:8050
       GATEWAY_PORT: "8080"
+      GATEWAY_CIRCUIT_BREAKER_N: "${GATEWAY_CIRCUIT_BREAKER_N:-3}"
+      GATEWAY_CIRCUIT_BREAKER_RECOVERY_TIMEOUT: "${GATEWAY_CIRCUIT_BREAKER_RECOVERY_TIMEOUT:-5}"
     ports:
       - "${GATEWAY_PORT:-8080}:8080"
     healthcheck:

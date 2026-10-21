@@ -1,4 +1,5 @@
 import asyncio
+from collections.abc import Callable
 from urllib.parse import quote
 from uuid import UUID
 
@@ -7,6 +8,7 @@ from pydantic import TypeAdapter, ValidationError
 
 from gateway.domain.errors import NotFound, ServiceName, UpstreamRejected, UpstreamUnavailable
 from gateway.domain.models import Account, Flight, FlightPage, Payment, Ticket
+from gateway.infrastructure.circuit_breaker import CircuitBreaker
 from gateway.infrastructure.schemas import (
     AccountDTO,
     FlightDTO,
@@ -20,8 +22,15 @@ from gateway.infrastructure.schemas import (
 class HttpAdapter:
     service_name: ServiceName
 
-    def __init__(self, client: httpx.AsyncClient, retries: int = 2) -> None:
+    def __init__(
+        self,
+        client: httpx.AsyncClient,
+        retries: int = 2,
+        *,
+        breaker: CircuitBreaker | None = None,
+    ) -> None:
         self._client, self._retries = client, retries
+        self._breaker = breaker
 
     async def request(
         self,
@@ -61,12 +70,22 @@ class HttpAdapter:
         username: str | None = None,
         body: dict[str, object] | None = None,
         params: dict[str, int] | None = None,
+        *,
+        validate: Callable[[T], bool] | None = None,
     ) -> T:
-        response = await self.request(method, path, username, body, params)
-        try:
-            return schema.validate_json(response.content)
-        except ValidationError as error:
-            raise UpstreamUnavailable(self.service_name) from error
+        async def execute() -> T:
+            response = await self.request(method, path, username, body, params)
+            try:
+                result = schema.validate_json(response.content)
+            except ValidationError as error:
+                raise UpstreamUnavailable(self.service_name) from error
+            if validate is not None and not validate(result):
+                raise UpstreamUnavailable(self.service_name)
+            return result
+
+        if method == "GET" and self._breaker is not None:
+            return await self._breaker.call(execute)
+        return await execute()
 
 
 class HttpFlightClient(HttpAdapter):
@@ -83,10 +102,11 @@ class HttpFlightClient(HttpAdapter):
 
     async def get_flight(self, number: str) -> Flight:
         result = await self.read(
-            TypeAdapter(FlightDTO), "GET", "/internal/v1/flights/" + quote(number, safe="")
+            TypeAdapter(FlightDTO),
+            "GET",
+            "/internal/v1/flights/" + quote(number, safe=""),
+            validate=lambda result: result.flight_number == number,
         )
-        if result.flight_number != number:
-            raise UpstreamUnavailable(self.service_name)
         return result.to_domain()
 
 
@@ -101,10 +121,12 @@ class HttpTicketClient(HttpAdapter):
 
     async def get_ticket(self, username: str, uid: UUID) -> Ticket:
         result = await self.read(
-            TypeAdapter(TicketDTO), "GET", f"/internal/v1/tickets/{uid}", username
+            TypeAdapter(TicketDTO),
+            "GET",
+            f"/internal/v1/tickets/{uid}",
+            username,
+            validate=lambda result: result.ticket_uid == uid,
         )
-        if result.ticket_uid != uid:
-            raise UpstreamUnavailable(self.service_name)
         return result.to_domain()
 
     async def create_ticket(self, username: str, uid: UUID, number: str, price: int) -> Ticket:
