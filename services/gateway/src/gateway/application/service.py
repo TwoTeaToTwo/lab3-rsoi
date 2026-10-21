@@ -2,10 +2,11 @@ import asyncio
 import logging
 from uuid import UUID, uuid4
 
-from gateway.application.ports import BonusClient, FlightClient, TicketClient
+from gateway.application.ports import BonusClient, FlightClient, RefundQueue, TicketClient
 from gateway.domain.errors import (
     InvalidInput,
     NotFound,
+    RefundQueueUnavailable,
     Unavailable,
     UpstreamRejected,
     UpstreamUnavailable,
@@ -16,6 +17,7 @@ from gateway.domain.models import (
     FlightPage,
     Privilege,
     PurchaseResult,
+    RefundTask,
     Ticket,
     TicketInfo,
     UserInfo,
@@ -25,8 +27,15 @@ logger = logging.getLogger(__name__)
 
 
 class GatewayService:
-    def __init__(self, flights: FlightClient, tickets: TicketClient, bonus: BonusClient) -> None:
+    def __init__(
+        self,
+        flights: FlightClient,
+        tickets: TicketClient,
+        bonus: BonusClient,
+        refund_queue: RefundQueue | None = None,
+    ) -> None:
         self._flights, self._tickets, self._bonus = flights, tickets, bonus
+        self._refund_queue = refund_queue
         self._pending: dict[UUID, str] = {}
 
     async def list_flights(self, page: int, size: int) -> FlightPage:
@@ -151,9 +160,15 @@ class GatewayService:
     async def cancel(self, username: str, uid: UUID) -> None:
         ticket = await self._tickets.get_ticket(username, uid)
         self._owned(ticket, username)
-        try:
-            await self._bonus.reverse_purchase(username, uid)
-        except NotFound as error:
-            if ticket.status != "CANCELED":
-                raise Unavailable("Bonus operation is missing") from error
         await self._tickets.cancel_ticket(username, uid)
+        task = RefundTask(uid, username)
+        try:
+            await self.process_refund(task)
+        except Unavailable:
+            if self._refund_queue is None:
+                raise RefundQueueUnavailable() from None
+            await self._refund_queue.publish(task)
+            logger.info("Bonus refund queued: %s", task.operation_id)
+
+    async def process_refund(self, task: RefundTask) -> None:
+        await self._bonus.reverse_purchase(task.username, task.ticket_uid)

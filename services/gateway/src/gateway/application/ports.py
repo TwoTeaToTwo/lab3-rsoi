@@ -1,7 +1,7 @@
 from typing import Protocol
 from uuid import UUID
 
-from gateway.domain.models import Account, Flight, FlightPage, Payment, Ticket
+from gateway.domain.models import Account, Flight, FlightPage, Payment, RefundTask, Ticket
 
 
 class FlightClient(Protocol):
@@ -22,3 +22,7 @@ class BonusClient(Protocol):
         self, username: str, uid: UUID, price: int, paid_from_balance: bool
     ) -> Payment: ...
     async def reverse_purchase(self, username: str, uid: UUID) -> None: ...
+
+
+class RefundQueue(Protocol):
+    async def publish(self, task: RefundTask) -> None: ...

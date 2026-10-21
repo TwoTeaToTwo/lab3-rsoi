@@ -86,6 +86,11 @@ def create_router(service: GatewayService) -> APIRouter:
         status_code=204,
         response_class=Response,
         responses={**ticket_errors, 503: {"model": ErrorDTO}},
+        description="Сначала билет отменяется в Ticket, затем отменяется бонусная операция. "
+        "При временном отказе Bonus задание публикуется в RabbitMQ с подтверждением, "
+        "после чего возвращается 204. "
+        "Gateway повторяет бонусный возврат через очередь до успеха с интервалом 10 секунд. "
+        "При ошибке публикации возвращается 503; повторный DELETE безопасен.",
     )
     async def cancel(username: Username, ticket_uid: TicketUid) -> Response:
         await service.cancel(username, ticket_uid)

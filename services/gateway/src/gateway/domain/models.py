@@ -86,3 +86,13 @@ class PurchaseResult(Flight):
 class UserInfo:
     tickets: tuple[TicketInfo, ...]
     privilege: Privilege | None
+
+
+@dataclass(frozen=True, slots=True)
+class RefundTask:
+    ticket_uid: UUID
+    username: str
+
+    @property
+    def operation_id(self) -> str:
+        return f"bonus-refund:{self.ticket_uid}"

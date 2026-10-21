@@ -21,6 +21,7 @@ from gateway.domain.errors import (
 )
 from gateway.infrastructure.circuit_breaker import CircuitBreaker
 from gateway.infrastructure.http import HttpBonusClient, HttpFlightClient, HttpTicketClient
+from gateway.infrastructure.rabbitmq import RabbitRefundQueue
 from gateway.presentation.api import create_router
 from gateway.presentation.schemas import ErrorDescription, ErrorDTO, ValidationErrorDTO
 
@@ -30,6 +31,7 @@ logger = logging.getLogger(__name__)
 def create_app(service: GatewayService | None = None) -> FastAPI:
     clients: list[httpx.AsyncClient] = []
     breakers: dict[ServiceName, CircuitBreaker] = {}
+    refund_queue: RabbitRefundQueue | None = None
     if service is None:
         settings = Settings()
         breakers = {
@@ -48,10 +50,18 @@ def create_app(service: GatewayService | None = None) -> FastAPI:
             httpx.AsyncClient(base_url=url, timeout=timeout)
             for url in (settings.flight_url, settings.ticket_url, settings.bonus_url)
         ]
+        refund_queue = RabbitRefundQueue(
+            settings.rabbitmq_url,
+            settings.refund_queue,
+            settings.refund_error_queue,
+            retry_interval=settings.refund_retry_interval,
+            timeout=settings.rabbitmq_timeout,
+        )
         service = GatewayService(
             HttpFlightClient(clients[0], settings.retries, breaker=breakers["Flight"]),
             HttpTicketClient(clients[1], settings.retries, breaker=breakers["Ticket"]),
             HttpBonusClient(clients[2], settings.retries, breaker=breakers["Bonus"]),
+            refund_queue,
         )
     gateway_service = service
 
@@ -65,18 +75,27 @@ def create_app(service: GatewayService | None = None) -> FastAPI:
 
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
-        task = asyncio.create_task(recovery_loop())
+        task: asyncio.Task[None] | None = None
         try:
+            if refund_queue is not None:
+                await refund_queue.start(gateway_service.process_refund)
+            task = asyncio.create_task(recovery_loop())
             yield
         finally:
-            task.cancel()
-            with suppress(asyncio.CancelledError):
-                await task
-            for client in clients:
-                await client.aclose()
+            try:
+                if task is not None:
+                    task.cancel()
+                    with suppress(asyncio.CancelledError):
+                        await task
+                if refund_queue is not None:
+                    await refund_queue.close()
+            finally:
+                for client in clients:
+                    await client.aclose()
 
     app = FastAPI(title="Flight Booking Gateway", version="2.0.0", lifespan=lifespan)
     app.state.circuit_breakers = breakers
+    app.state.refund_queue = refund_queue
     app.include_router(create_router(service))
 
     @app.exception_handler(RequestValidationError)

@@ -1,4 +1,23 @@
 services:
+  rabbitmq:
+    image: rabbitmq:4.2.9-management
+    hostname: rabbitmq
+    restart: on-failure
+    environment:
+      RABBITMQ_DEFAULT_USER: "${RABBITMQ_USERNAME:-gateway}"
+      RABBITMQ_DEFAULT_PASS: "${RABBITMQ_PASSWORD:-gateway}"
+    volumes:
+      - rabbitmq-data:/var/lib/rabbitmq
+    ports:
+      - "127.0.0.1:${RABBITMQ_PORT:-5672}:5672"
+      - "127.0.0.1:${RABBITMQ_MANAGEMENT_PORT:-15672}:15672"
+    healthcheck:
+      test: ["CMD-SHELL", "rabbitmq-diagnostics -q check_running && rabbitmq-diagnostics -q check_port_connectivity"]
+      interval: 5s
+      timeout: 10s
+      retries: 20
+      start_period: 20s
+
   postgres:
     image: library/postgres:13
     restart: on-failure
@@ -130,6 +149,8 @@ services:
       network: "${GATEWAY_BUILD_NETWORK:-default}"
     restart: on-failure
     depends_on:
+      rabbitmq:
+        condition: service_healthy
       flight-service:
         condition: service_healthy
       ticket-service:
@@ -143,6 +164,11 @@ services:
       GATEWAY_PORT: "8080"
       GATEWAY_CIRCUIT_BREAKER_N: "${GATEWAY_CIRCUIT_BREAKER_N:-3}"
       GATEWAY_CIRCUIT_BREAKER_RECOVERY_TIMEOUT: "${GATEWAY_CIRCUIT_BREAKER_RECOVERY_TIMEOUT:-5}"
+      GATEWAY_RABBITMQ_HOST: rabbitmq
+      GATEWAY_RABBITMQ_PORT: "5672"
+      GATEWAY_RABBITMQ_USERNAME: "${RABBITMQ_USERNAME:-gateway}"
+      GATEWAY_RABBITMQ_PASSWORD: "${RABBITMQ_PASSWORD:-gateway}"
+      GATEWAY_REFUND_RETRY_INTERVAL: "${GATEWAY_REFUND_RETRY_INTERVAL:-10}"
     ports:
       - "${GATEWAY_PORT:-8080}:8080"
     healthcheck:
@@ -154,3 +180,4 @@ services:
 
 volumes:
   db-data:
+  rabbitmq-data:

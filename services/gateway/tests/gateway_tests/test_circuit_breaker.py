@@ -1,5 +1,6 @@
 import asyncio
 from collections.abc import Awaitable, Callable
+from unittest.mock import AsyncMock
 
 import httpx
 import pytest
@@ -248,6 +249,8 @@ async def test_application_wiring_protects_all_reads_including_purchase_and_canc
         )
 
     monkeypatch.setattr("gateway.main.httpx.AsyncClient", client_factory)
+    monkeypatch.setattr("gateway.main.RabbitRefundQueue.start", AsyncMock())
+    monkeypatch.setattr("gateway.main.RabbitRefundQueue.close", AsyncMock())
     app = create_app()
     async with app.router.lifespan_context(app):
         async with original_client(

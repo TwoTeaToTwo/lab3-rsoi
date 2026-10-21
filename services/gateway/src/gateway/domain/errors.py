@@ -15,6 +15,11 @@ class Unavailable(GatewayError):
     pass
 
 
+class RefundQueueUnavailable(Unavailable):
+    def __init__(self) -> None:
+        super().__init__("Refund queue unavailable")
+
+
 class UpstreamUnavailable(Unavailable):
     def __init__(self, service: ServiceName) -> None:
         super().__init__(f"{service} Service unavailable")
