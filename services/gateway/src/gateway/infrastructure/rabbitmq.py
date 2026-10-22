@@ -71,7 +71,7 @@ class RabbitRefundQueue:
                 with suppress(asyncio.CancelledError):
                     await self._worker
         finally:
-            # Closing the connection requeues an in-flight unacknowledged delivery.
+
             if self._connection is not None:
                 await self._connection.close()
             self._publisher = None
@@ -129,7 +129,7 @@ class RabbitRefundQueue:
             )
         else:
             logger.info("Refund completed: %s", task.operation_id)
-        # Confirm only after HTTP success, or after confirmed retry/error publication.
+
         await message.ack()
 
     async def _consume(self, handler: Callable[[RefundTask], Awaitable[None]]) -> None:
