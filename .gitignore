@@ -1197,6 +1197,10 @@ FodyWeavers.xsd
 [Ll]ib64
 [Ll]ocal
 [Ss]cripts
+!postgres/scripts/
+!postgres/scripts/bonus.sql
+!postgres/scripts/ticket.sql
+!postgres/scripts/flight.sql
 pyvenv.cfg
 pip-selfcheck.json
 
