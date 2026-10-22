@@ -71,7 +71,6 @@ class RabbitRefundQueue:
                 with suppress(asyncio.CancelledError):
                     await self._worker
         finally:
-
             if self._connection is not None:
                 await self._connection.close()
             self._publisher = None
